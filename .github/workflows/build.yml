@@ -1,39 +1,99 @@
-name: Rawocado Build
+name: Rawocado Commit Release
 
 on:
   push:
-  pull_request:
-  workflow_dispatch:
-  schedule:
-    # Nightly build at 02:00 UTC
-    - cron: "0 2 * * *"
 
 jobs:
-  build-windows:
+  nightly-release:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
+    env:
+      APT_CACHE_DIR: ${{ runner.temp }}/apt-cache
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Restore apt package cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.APT_CACHE_DIR }}
+          key: apt-${{ runner.os }}-mingw-w64-v1
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-mingw-w64-v1
+          restore-keys: |
+            ccache-${{ runner.os }}-mingw-w64-
+
       - name: Install cross-compiler toolchain
         run: |
+          mkdir -p "${APT_CACHE_DIR}/partial"
           sudo apt-get update
-          sudo apt-get install -y make g++-mingw-w64-x86-64 zip
-          x86_64-w64-mingw32-g++-posix --version
+          sudo apt-get install -y --no-install-recommends \
+            -o Dir::Cache::archives="${APT_CACHE_DIR}" \
+            make g++-mingw-w64-x86-64 zip ccache
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size=1G
+          ccache --zero-stats
 
       - name: Build
-        run: make -j"$(nproc)" build
+        run: make -j"$(nproc)" CC="ccache x86_64-w64-mingw32-g++-posix" build
 
-      - name: Package artifact
+      - name: Bundle runtime files
         run: |
-          mkdir -p artifacts
-          cp RAWocado.exe artifacts/
-          if [ -f libraw.dll ]; then cp libraw.dll artifacts/; fi
+          set -euo pipefail
 
-          cat > artifacts/BUILD_INFO.txt <<EOF
+          mkdir -p dist
+          cp RAWocado.exe dist/
+
+          mapfile -t deps < <(x86_64-w64-mingw32-objdump -p RAWocado.exe | awk '/DLL Name:/{print $3}' | sort -u)
+          missing=()
+
+          is_system_dll() {
+            local u
+            u="$(echo "$1" | tr '[:lower:]' '[:upper:]')"
+            case "$u" in
+              KERNEL32.DLL|USER32.DLL|GDI32.DLL|OPENGL32.DLL|COMDLG32.DLL|OLE32.DLL|UUID.DLL|SHELL32.DLL|ADVAPI32.DLL|WS2_32.DLL|IMM32.DLL|WINMM.DLL|VERSION.DLL|SETUPAPI.DLL|NTDLL.DLL|SHLWAPI.DLL|COMCTL32.DLL|RPCRT4.DLL|MSVCRT.DLL)
+                return 0
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
+          for dll in "${deps[@]}"; do
+            if is_system_dll "$dll"; then
+              continue
+            fi
+
+            found=""
+            for p in . vendor/libraw/bin /usr/x86_64-w64-mingw32/bin; do
+              if [ -f "$p/$dll" ]; then
+                found="$p/$dll"
+                break
+              fi
+            done
+
+            if [ -n "$found" ]; then
+              cp "$found" dist/
+            else
+              missing+=("$dll")
+            fi
+          done
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Missing non-system runtime DLLs: ${missing[*]}"
+            exit 1
+          fi
+
+          cat > dist/BUILD_INFO.txt <<EOF
           Commit: ${GITHUB_SHA}
           Ref: ${GITHUB_REF}
           Event: ${GITHUB_EVENT_NAME}
@@ -43,11 +103,20 @@ jobs:
           EOF
 
           short_sha="${GITHUB_SHA::7}"
-          zip -9 -r "RAWocado-${short_sha}.zip" artifacts
+          zip -9 -r "RAWocado-${short_sha}.zip" dist
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Publish commit release
+        uses: softprops/action-gh-release@v2
         with:
-          name: RAWocado-${{ github.ref_name }}-${{ github.run_number }}
-          path: RAWocado-*.zip
-          retention-days: 14
+          tag_name: latest-commit
+          name: Latest Commit Build
+          prerelease: true
+          make_latest: false
+          generate_release_notes: false
+          body: |
+            Automated build from the latest pushed commit.
+          files: |
+            RAWocado-*.zip
+            dist/RAWocado.exe
+            dist/*.dll
+            dist/BUILD_INFO.txt
