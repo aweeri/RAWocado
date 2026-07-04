@@ -135,8 +135,8 @@ jobs:
         with:
           tag_name: latest-commit
           name: Latest Commit Build
-          prerelease: true
-          make_latest: false
+          prerelease: false
+          make_latest: true
           generate_release_notes: false
           body: |
             Automated build from the latest pushed commit.
