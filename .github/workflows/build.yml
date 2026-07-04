@@ -9,7 +9,7 @@ jobs:
     permissions:
       contents: write
     env:
-      APT_CACHE_DIR: ${{ runner.temp }}/apt-cache
+      APT_CACHE_DIR: ${{ github.workspace }}/.apt-cache
 
     steps:
       - name: Checkout
