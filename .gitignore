@@ -1,0 +1,8 @@
+/build/
+RAWocado.exe
+*.o
+libraw.dll
+imgui.ini
+.DS_Store
+Thumbs.db
+*.log
