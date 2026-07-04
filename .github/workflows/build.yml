@@ -79,6 +79,13 @@ jobs:
                 found="$p/$dll"
                 break
               fi
+
+              # objdump may report uppercase names while files are lowercase on Linux.
+              ci_match="$(find "$p" -maxdepth 1 -type f -iname "$dll" -print -quit 2>/dev/null || true)"
+              if [ -n "$ci_match" ]; then
+                found="$ci_match"
+                break
+              fi
             done
 
             if [ -n "$found" ]; then
