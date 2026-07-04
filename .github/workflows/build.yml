@@ -1,0 +1,53 @@
+name: Rawocado Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Nightly build at 02:00 UTC
+    - cron: "0 2 * * *"
+
+jobs:
+  build-windows:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cross-compiler toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y make g++-mingw-w64-x86-64 zip
+          x86_64-w64-mingw32-g++-posix --version
+
+      - name: Build
+        run: make -j"$(nproc)" build
+
+      - name: Package artifact
+        run: |
+          mkdir -p artifacts
+          cp RAWocado.exe artifacts/
+          if [ -f libraw.dll ]; then cp libraw.dll artifacts/; fi
+
+          cat > artifacts/BUILD_INFO.txt <<EOF
+          Commit: ${GITHUB_SHA}
+          Ref: ${GITHUB_REF}
+          Event: ${GITHUB_EVENT_NAME}
+          Workflow: ${GITHUB_WORKFLOW}
+          Run Number: ${GITHUB_RUN_NUMBER}
+          Built At (UTC): $(date -u +"%Y-%m-%d %H:%M:%S")
+          EOF
+
+          short_sha="${GITHUB_SHA::7}"
+          zip -9 -r "RAWocado-${short_sha}.zip" artifacts
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RAWocado-${{ github.ref_name }}-${{ github.run_number }}
+          path: RAWocado-*.zip
+          retention-days: 14
