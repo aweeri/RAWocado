@@ -285,43 +285,53 @@ static float srgb_encode_display(float v) {
 static void draw_combined_histogram(const HistogramData& h, ImVec2 pos, ImVec2 size) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    // Draw faint background grid
-    ImU32 grid_col = IM_COL32(255,255,255,12);
-    for (int gx = 0; gx <= 4; gx++) {
-        float x = pos.x + (size.x * gx) / 4.0f;
-        dl->AddLine(ImVec2(x, pos.y), ImVec2(x, pos.y + size.y), grid_col);
-    }
+    float padding_x = 4.0f; // Margin so extreme peaks don't clip the border
+    float usable_width = size.x - padding_x * 2.0f;
 
-    // Draw histogram background and grid
+    // Draw histogram background and border FIRST so it doesn't cover the grid
     ImU32 bg_col = IM_COL32(16, 16, 16, 220);
     ImU32 border_col = IM_COL32(255, 255, 255, 25);
     dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), bg_col);
     dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), border_col);
 
-    float curve_step = size.x / 255.0f;
+    // Draw faint background grid aligned to the padded area
+    ImU32 grid_col = IM_COL32(255,255,255,12);
+    for (int gx = 0; gx <= 4; gx++) {
+        float x = pos.x + padding_x + (usable_width * gx) / 4.0f;
+        dl->AddLine(ImVec2(x, pos.y), ImVec2(x, pos.y + size.y), grid_col);
+    }
+
+    float curve_step = usable_width / 255.0f;
     float fixed_max = h.max_val * 1.05f;
     if (fixed_max < 1.0f) fixed_max = 1.0f;
 
     auto get_smoothed = [](const float* arr, int index, int radius) {
+        // Don't smooth the absolute extreme bins so clipping spikes stay sharp
+        if (index == 0 || index == 255) return arr[index];
+
         float sum = 0.0f;
         float weight_sum = 0.0f;
         for (int i = -radius; i <= radius; i++) {
             int idx = index + i;
-            if (idx >= 0 && idx < 256) {
+            if (idx > 0 && idx < 255) { // Skip 0 and 255 so clipping doesn't drag up the neighbors
                 float w = (float)(radius + 1 - abs(i));
                 sum += arr[idx] * w;
                 weight_sum += w;
             }
         }
-        return sum / weight_sum;
+        return (weight_sum > 0.0f) ? (sum / weight_sum) : 0.0f;
     };
 
     auto draw_channel_line = [&](const float* data, ImU32 col, float thickness) {
         ImVec2 pts[256];
         for (int i = 0; i < 256; i++) {
             float smoothed_val = get_smoothed(data, i, 5);
-            float x = pos.x + i * curve_step;
+            float x = pos.x + padding_x + i * curve_step;
             float y = pos.y + size.y * (1.0f - fminf(smoothed_val / fixed_max, 1.0f));
+            
+            // Prevent the 0-value bottom line from rendering exactly over the border line
+            y = fminf(y, pos.y + size.y - 1.0f);
+            
             pts[i] = ImVec2(x, y);
         }
         dl->AddPolyline(pts, 256, col, false, thickness);
@@ -331,6 +341,15 @@ static void draw_combined_histogram(const HistogramData& h, ImVec2 pos, ImVec2 s
     if (g_image.show_g) draw_channel_line(h.g, IM_COL32(60, 220, 60, 220), 1.5f);
     if (g_image.show_b) draw_channel_line(h.b, IM_COL32(60, 120, 220, 220), 1.5f);
     if (g_image.show_luma) draw_channel_line(h.luma, IM_COL32(240, 240, 240, 220), 2.0f);
+
+    // Draw visual clipping warning bars at the edges if a significant amount of data is crushed/blown out
+    float clip_threshold = fixed_max * 0.05f; // 5% of max peak threshold
+    if (h.black_clip_count > clip_threshold) {
+        dl->AddRectFilled(pos, ImVec2(pos.x + 3.0f, pos.y + size.y), IM_COL32(60, 120, 255, 200));
+    }
+    if (h.white_clip_count > clip_threshold) {
+        dl->AddRectFilled(ImVec2(pos.x + size.x - 3.0f, pos.y), ImVec2(pos.x + size.x, pos.y + size.y), IM_COL32(255, 60, 60, 200));
+    }
 }
 
 // -----------------------------------------------------------------------------

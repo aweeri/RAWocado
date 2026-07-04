@@ -290,6 +290,8 @@ static inline float luminance709(float r, float g, float b) {
 
 static inline float srgb_encode(float v) {
     v = clamp(v, 0.0f, 1.0f);
+    if (v >= 1.0f) return 1.0f; // Fast-path to prevent IEEE 754 precision loss
+    if (v <= 0.0f) return 0.0f;
     if (v <= 0.0031308f) return 12.92f * v;
     return 1.055f * powf(v, 1.0f / 2.4f) - 0.055f;
 }
@@ -347,11 +349,11 @@ static void rebuild_histogram_from_buffer(const float* buffer, int width, int he
                 float r = buffer[idx];
                 float g = buffer[idx + 1];
                 float b = buffer[idx + 2];
-                int bin_r = (int)(clamp(r, 0.0f, 1.0f) * 255.0f);
-                int bin_g = (int)(clamp(g, 0.0f, 1.0f) * 255.0f);
-                int bin_b = (int)(clamp(b, 0.0f, 1.0f) * 255.0f);
+                int bin_r = (int)(clamp(r, 0.0f, 1.0f) * 255.999f);
+                int bin_g = (int)(clamp(g, 0.0f, 1.0f) * 255.999f);
+                int bin_b = (int)(clamp(b, 0.0f, 1.0f) * 255.999f);
                 float luma = 0.299f * r + 0.587f * g + 0.114f * b;
-                int bin_luma = (int)(clamp(luma, 0.0f, 1.0f) * 255.0f);
+                int bin_luma = (int)(clamp(luma, 0.0f, 1.0f) * 255.999f);
                 histogram.r[bin_r]++;
                 histogram.g[bin_g]++;
                 histogram.b[bin_b]++;
@@ -367,11 +369,11 @@ static void rebuild_histogram_from_buffer(const float* buffer, int width, int he
                     float r = buffer[idx];
                     float g = buffer[idx + 1];
                     float b = buffer[idx + 2];
-                    int bin_r = (int)(clamp(r, 0.0f, 1.0f) * 255.0f);
-                    int bin_g = (int)(clamp(g, 0.0f, 1.0f) * 255.0f);
-                    int bin_b = (int)(clamp(b, 0.0f, 1.0f) * 255.0f);
+                    int bin_r = (int)(clamp(r, 0.0f, 1.0f) * 255.999f);
+                    int bin_g = (int)(clamp(g, 0.0f, 1.0f) * 255.999f);
+                    int bin_b = (int)(clamp(b, 0.0f, 1.0f) * 255.999f);
                     float luma = 0.299f * r + 0.587f * g + 0.114f * b;
-                    int bin_luma = (int)(clamp(luma, 0.0f, 1.0f) * 255.0f);
+                    int bin_luma = (int)(clamp(luma, 0.0f, 1.0f) * 255.999f);
                     h.r[bin_r]++;
                     h.g[bin_g]++;
                     h.b[bin_b]++;
@@ -1548,9 +1550,9 @@ void process_image_pipeline() {
                     float final_r, final_g, final_b;
                     process_pixel(hist_ctx, x, y, &final_r, &final_g, &final_b);
 
-                    int bin_r = (int)(clamp(final_r, 0.0f, 1.0f) * 255.0f);
-                    int bin_g = (int)(clamp(final_g, 0.0f, 1.0f) * 255.0f);
-                    int bin_b = (int)(clamp(final_b, 0.0f, 1.0f) * 255.0f);
+                    int bin_r = (int)(clamp(final_r, 0.0f, 1.0f) * 255.999f);
+                    int bin_g = (int)(clamp(final_g, 0.0f, 1.0f) * 255.999f);
+                    int bin_b = (int)(clamp(final_b, 0.0f, 1.0f) * 255.999f);
 
                     // Convert to linear light for physically meaningful luminance,
                     // then map back to display-referred code value for histogram binning.
@@ -1558,7 +1560,7 @@ void process_image_pipeline() {
                     float lin_g = srgb_decode_fast(final_g);
                     float lin_b = srgb_decode_fast(final_b);
                     float luma_linear = luminance709(lin_r, lin_g, lin_b);
-                    int bin_luma = (int)(clamp(srgb_encode_fast(luma_linear), 0.0f, 1.0f) * 255.0f);
+                    int bin_luma = (int)(clamp(srgb_encode_fast(luma_linear), 0.0f, 1.0f) * 255.999f);
 
                     int wx = hist_step;
                     int wy = hist_step;
@@ -1613,12 +1615,16 @@ void process_image_pipeline() {
         }
 
         g_image.histogram.max_val = 0.0f;
-        for (int i = 0; i < 256; i++) {
+        // Ignore bins 0 and 255 so massive clipping spikes don't flatten the rest of the graph
+        for (int i = 1; i < 255; i++) {
             if (g_image.histogram.r[i] > g_image.histogram.max_val) g_image.histogram.max_val = g_image.histogram.r[i];
             if (g_image.histogram.g[i] > g_image.histogram.max_val) g_image.histogram.max_val = g_image.histogram.g[i];
             if (g_image.histogram.b[i] > g_image.histogram.max_val) g_image.histogram.max_val = g_image.histogram.b[i];
             if (g_image.histogram.luma[i] > g_image.histogram.max_val) g_image.histogram.max_val = g_image.histogram.luma[i];
         }
+        
+        g_image.histogram.black_clip_count = g_image.histogram.luma[0];
+        g_image.histogram.white_clip_count = g_image.histogram.luma[255];
 
         g_last_histogram_compute = now;
         auto hist_end = std::chrono::steady_clock::now();
