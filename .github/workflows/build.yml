@@ -127,18 +127,19 @@ jobs:
           EOF
 
           short_sha="${GITHUB_SHA::7}"
+          echo "SHORT_SHA=${short_sha}" >> $GITHUB_ENV
           mv dist rawocado
           zip -9 -r "RAWocado-${short_sha}.zip" rawocado
 
       - name: Publish commit release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest-commit
-          name: Latest Commit Build
+          tag_name: commit-${{ env.SHORT_SHA }}
+          name: Commit ${{ env.SHORT_SHA }}
           prerelease: false
           make_latest: true
           generate_release_notes: false
           body: |
-            Automated build from the latest pushed commit.
+            Automated build from commit ${{ github.sha }}.
           files: |
             RAWocado-*.zip
