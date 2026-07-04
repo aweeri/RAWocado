@@ -91,7 +91,23 @@ jobs:
             if [ -n "$found" ]; then
               cp "$found" dist/
             else
+              # Fallback: fetch LibRaw runtime package if libraw.dll is required but absent in repo.
+              dll_upper="$(echo "$dll" | tr '[:lower:]' '[:upper:]')"
+              if [ "$dll_upper" = "LIBRAW.DLL" ]; then
+                tmp_dir="$(mktemp -d)"
+                curl -fsSL "https://www.libraw.org/data/LibRaw-0.22.1-Win64.zip" -o "$tmp_dir/libraw.zip"
+                unzip -q "$tmp_dir/libraw.zip" -d "$tmp_dir"
+                fallback_libraw="$(find "$tmp_dir" -type f -iname "libraw.dll" -print -quit)"
+                if [ -n "$fallback_libraw" ]; then
+                  cp "$fallback_libraw" "dist/libraw.dll"
+                  found="dist/libraw.dll"
+                fi
+                rm -rf "$tmp_dir"
+              fi
+
+              if [ -z "$found" ]; then
               missing+=("$dll")
+              fi
             fi
           done
 
