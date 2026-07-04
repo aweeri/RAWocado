@@ -902,7 +902,6 @@ static float median_window(const std::vector<float>& src, int w, int h, int x, i
 
 static float apply_luma_tone(const ProcessingContext& ctx, float y) {
     y = fmaxf(y, 0.0f);
-    float y_norm = clamp(y, 0.0f, 1.0f);
 
     float h = soft_slider(ctx.params.highlights, 1.20f);
     float s = soft_slider(ctx.params.shadows, 1.50f);
@@ -910,37 +909,69 @@ static float apply_luma_tone(const ProcessingContext& ctx, float y) {
     float w = soft_slider(ctx.params.whites, 1.25f);
     float b = soft_slider(ctx.params.blacks, 1.25f);
 
-    float highlight_mask = smoothstep(0.42f, 0.98f, y_norm);
-    float shadow_mask = 1.0f - smoothstep(0.02f, 0.62f, y_norm);
-    float mid_mask = smoothstep(0.12f, 0.45f, y_norm) * (1.0f - smoothstep(0.55f, 0.90f, y_norm));
-    float white_mask = smoothstep(0.68f, 1.0f, y_norm);
-    float black_mask = 1.0f - smoothstep(0.0f, 0.32f, y_norm);
-
-    float delta = 0.0f;
-    delta += h * highlight_mask * 0.58f;
-    delta += s * shadow_mask * 0.42f;
-    delta += m * mid_mask * 0.42f;
-    delta += w * white_mask * 0.68f;
-    delta += b * black_mask * 0.68f;
-
-    // Roll off near extreme ends so slider edges feel smoother and less abrupt.
-    float highlight_rolloff = 1.0f - 0.35f * smoothstep(0.86f, 1.0f, y_norm);
-    float shadow_rolloff = 1.0f - 0.30f * (1.0f - smoothstep(0.0f, 0.14f, y_norm));
-    delta *= highlight_rolloff * shadow_rolloff;
-
-    float out_y = y + delta;
-
-    float contrast_delta = ctx.params.contrast / 100.0f;
-    float yn = clamp(out_y, 0.0f, 1.0f);
-    if (contrast_delta > 0.0f) {
-        float scurve = smoothstep01(yn);
-        yn = mixf(yn, scurve, clamp(contrast_delta, 0.0f, 1.0f));
-    } else if (contrast_delta < 0.0f) {
-        float invcurve = inverse_smoothstep(yn);
-        yn = mixf(yn, invcurve, clamp(-contrast_delta, 0.0f, 1.0f));
+    // 1. Blacks: shift the absolute black point, smoothly decaying
+    if (fabsf(b) > 1e-4f) {
+        float black_shift = b * 0.05f;
+        y = fmaxf(0.0f, y + black_shift * (1.0f - smoothstep(0.0f, 0.2f, y)));
     }
 
-    return fmaxf(yn, 0.0f);
+    // 2. Shadows: toe curve compression/lift
+    float shadow_pivot = 0.25f;
+    if (y < shadow_pivot && y > 0.0f) {
+        float t = y / shadow_pivot;
+        // s > 0 lifts shadows (bows up), s < 0 crushes (bows down)
+        float curve = s > 0.0f ? powf(t, 1.0f - s * 0.5f) : powf(t, 1.0f - s * 1.2f);
+        y = mixf(t, curve, fabsf(s)) * shadow_pivot;
+    }
+
+    // 3. Midtones: gamma curve pivoted around middle gray
+    if (fabsf(m) > 1e-4f) {
+        float gray = 0.18f;
+        float gamma = expf(-m * 1.5f);
+        y = gray * powf(fmaxf(y / gray, 0.0f), gamma);
+    }
+
+    // 4. Highlights & Whites: Unbounded shoulder compression (Reinhard extended)
+    float highlight_pivot = 0.5f;
+    if (y > highlight_pivot) {
+        float over = y - highlight_pivot;
+        float max_out = 1.0f - highlight_pivot; // Space left to 1.0
+
+        // Whites slider sets the maximum scene-linear value that maps to 1.0
+        // w = 0.0 maps ~3.0 linear to 1.0. 
+        // w = -1.0 maps ~10.0 linear to 1.0. 
+        // w = 1.0 maps ~1.2 linear to 1.0.
+        float wp_linear = 3.0f * expf(-w * 1.2f);
+        float wp_over = fmaxf(wp_linear - highlight_pivot, 0.01f);
+
+        // Highlights slider bends the curve. Negative = flatter earlier, Positive = sharper
+        float bend = expf(-h * 0.8f);
+
+        // Normalize ranges for Reinhard math
+        float x = over / max_out;
+        float x_white = wp_over / max_out;
+
+        float num = x * (1.0f + x / (x_white * x_white));
+        float den = 1.0f + x * bend;
+        float mapped_over = (num / den) * max_out;
+
+        y = highlight_pivot + mapped_over;
+    }
+
+    // 5. Global Contrast (S-Curve)
+    float contrast_delta = ctx.params.contrast / 100.0f;
+    if (fabsf(contrast_delta) > 1e-4f) {
+        float yn = clamp(y, 0.0f, 1.0f);
+        if (contrast_delta > 0.0f) {
+            float scurve = smoothstep01(yn);
+            y = mixf(yn, scurve, clamp(contrast_delta, 0.0f, 1.0f));
+        } else {
+            float invcurve = inverse_smoothstep(yn);
+            y = mixf(yn, invcurve, clamp(-contrast_delta, 0.0f, 1.0f));
+        }
+    }
+
+    return fmaxf(y, 0.0f);
 }
 
 static void process_pixel(const ProcessingContext& ctx, int x, int y, float* out_r, float* out_g, float* out_b) {

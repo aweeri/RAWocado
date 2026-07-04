@@ -616,7 +616,7 @@ int main(int argc, char** argv) {
             }
         };
 
-        const float min_inspector_width = 280.0f;
+        const float min_inspector_width = 340.0f;
         const float min_right_width = 180.0f;
         const float min_viewport_width = 220.0f;
         float usable_height = io.DisplaySize.y - bottom_bar_height;
@@ -672,6 +672,9 @@ int main(int argc, char** argv) {
         ImGui::SetNextWindowSize(ImVec2(inspector_width, 0));
         ImGui::SetNextWindowSizeConstraints(ImVec2(min_inspector_width, 0), ImVec2(max_inspector_width, usable_height));
         ImGui::Begin("Inspector", NULL, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+
+        // Reserve exactly 170 pixels on the right side for labels so they don't get cut off
+        ImGui::PushItemWidth(-170.0f);
 
         // Keep manual slider input safely in-range.
         ImGuiSliderFlags flags = ImGuiSliderFlags_AlwaysClamp;
@@ -791,171 +794,193 @@ int main(int argc, char** argv) {
             }
         }
 
-        ImGui::Separator();
-        const char* status_text = g_load_in_progress.load() ? "Loading" : (processing_pending ? "Processing" : "Idle");
-        ImGui::Text("Status: %s", status_text);
-        ImGui::Text("Last render: %.1f ms", last_processing_ms);
-        ImGui::Text("Worker process: %.1f ms", g_last_process_ms.load());
-        ImGui::Text("Histogram pass: %.1f ms", g_last_histogram_ms.load());
-        ImGui::Text("Source: %s", g_image.using_proxy_source ? "Proxy" : "Full");
+        if (ImGui::CollapsingHeader("Tools & Presets", ImGuiTreeNodeFlags_DefaultOpen)) {
+            float avail_w = ImGui::GetContentRegionAvail().x;
+            float half_w = (avail_w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 
-        const bool load_controls_disabled = g_load_in_progress.load();
-        if (load_controls_disabled) ImGui::BeginDisabled();
-        if (ImGui::Button("Add Images", ImVec2(-1, 30))) {
-            nfdpathset_t pathset;
-            nfdresult_t result = NFD_OpenDialogMultiple("arw,cr2,cr3,nef,dng,raw,raf,orf,pef,srw,x3f,rw2,3fr,iiq,kdc,mos,mrw,mef,erf,sr2,nrw", NULL, &pathset);
-            if (result == NFD_OKAY) {
-                std::vector<std::string> paths;
-                size_t count = NFD_PathSet_GetCount(&pathset);
-                paths.reserve(count);
-                for (size_t i = 0; i < count; ++i) {
-                    nfdchar_t* selected = NFD_PathSet_GetPath(&pathset, i);
-                    if (selected && selected[0]) paths.push_back(selected);
+            if (ImGui::Button("Reset Parameters", ImVec2(-1, 26))) {
+                g_params = g_default_params;
+                if (g_image.proxy_buffer) {
+                    g_params.temperature = g_image.image_temperature;
                 }
-                NFD_PathSet_Free(&pathset);
-                add_multiple_paths(paths, image_queue.empty() || current_image_index < 0);
-            }
-        }
-        if (ImGui::Button("Add Folder", ImVec2(-1, 30))) {
-            nfdchar_t* outPath = NULL;
-            nfdresult_t result = NFD_PickFolder(NULL, &outPath);
-            if (result == NFD_OKAY) {
-                std::vector<std::string> folder_paths;
-                append_raw_files_from_folder(outPath, folder_paths);
-                free(outPath);
-                add_multiple_paths(folder_paths, image_queue.empty() || current_image_index < 0);
-            }
-        }
-        if (load_controls_disabled) ImGui::EndDisabled();
-
-        if (image_queue.empty()) {
-            ImGui::TextDisabled("Add some RAW files (or a whole folder) to get started.");
-        } else {
-            ImGui::Text("Loaded images: %d", (int)image_queue.size());
-        }
-        
-        if (ImGui::Button("Reset Parameters", ImVec2(-1, 30))) {
-            g_params = g_default_params;
-            if (g_image.proxy_buffer) {
-                g_params.temperature = g_image.image_temperature;
-            }
-            params_changed = true;
-            g_image.zoom = 1.0f;
-            g_full_refresh_requested = true;
-            debug_log("ui reset parameters -> full refresh");
-        }
-
-        bool can_undo = history_index > 0;
-        bool can_redo = history_index + 1 < (int)history.size();
-        if (!can_undo) ImGui::BeginDisabled();
-        if (ImGui::Button("Undo", ImVec2(-1, 24))) {
-            history_index--;
-            g_params = history[(size_t)history_index];
-            params_changed = true;
-            history_dirty = false;
-            g_full_refresh_requested = true;
-            debug_log("ui undo -> history_index=%d full refresh", history_index);
-        }
-        if (!can_undo) ImGui::EndDisabled();
-
-        if (!can_redo) ImGui::BeginDisabled();
-        if (ImGui::Button("Redo", ImVec2(-1, 24))) {
-            history_index++;
-            g_params = history[(size_t)history_index];
-            params_changed = true;
-            history_dirty = false;
-            g_full_refresh_requested = true;
-            debug_log("ui redo -> history_index=%d full refresh", history_index);
-        }
-        if (!can_redo) ImGui::EndDisabled();
-
-        if (ImGui::Button("Save Preset", ImVec2(-1, 24))) {
-            nfdchar_t* outPath = NULL;
-            nfdresult_t result = NFD_SaveDialog("preset,txt", NULL, &outPath);
-            if (result == NFD_OKAY) {
-                sidecar_last_ok = save_preset_file(outPath, g_params);
-                free(outPath);
-            }
-        }
-
-        if (ImGui::Button("Copy Settings", ImVec2(-1, 24))) {
-            copied_params = g_params;
-            has_copied_params = true;
-        }
-
-        if (!has_copied_params) ImGui::BeginDisabled();
-        if (ImGui::Button("Paste Settings", ImVec2(-1, 24))) {
-            g_params = copied_params;
-            params_changed = true;
-            debug_log("ui paste settings");
-        }
-        if (!has_copied_params) ImGui::EndDisabled();
-
-        char sidecar_path[1300] = {0};
-        bool has_sidecar_target = build_sidecar_path(sidecar_path, sizeof(sidecar_path), g_current_image_path);
-        if (!has_sidecar_target) ImGui::BeginDisabled();
-        if (ImGui::Button("Save Sidecar", ImVec2(-1, 24))) {
-            sidecar_last_ok = save_preset_file(sidecar_path, g_params);
-            if (sidecar_last_ok) sidecar_dirty = false;
-        }
-        if (ImGui::Button("Load Sidecar", ImVec2(-1, 24))) {
-            EditorParams loaded = g_params;
-            if (load_preset_file(sidecar_path, &loaded)) {
-                g_params = loaded;
                 params_changed = true;
-                sidecar_last_ok = true;
-                sidecar_dirty = false;
+                g_image.zoom = 1.0f;
+                g_full_refresh_requested = true;
+                debug_log("ui reset parameters -> full refresh");
             }
-        }
-        if (!has_sidecar_target) ImGui::EndDisabled();
-        ImGui::Text("Sidecar: %s", sidecar_dirty ? "dirty" : "clean");
-        if (!sidecar_last_ok) {
-            ImGui::Text("Sidecar write: failed");
-        }
-
-        ImGui::Text("History: %d / %d", history_index + 1, (int)history.size());
-
-        if (ImGui::Button("Load Preset", ImVec2(-1, 24))) {
-            nfdchar_t* outPath = NULL;
-            nfdresult_t result = NFD_OpenDialog("preset,txt", NULL, &outPath);
-            if (result == NFD_OKAY) {
-                EditorParams loaded = g_params;
-                if (load_preset_file(outPath, &loaded)) {
-                    g_params = loaded;
-                    params_changed = true;
-                    sidecar_dirty = true;
-                }
-                free(outPath);
+            
+            bool can_undo = history_index > 0;
+            bool can_redo = history_index + 1 < (int)history.size();
+            
+            if (!can_undo) ImGui::BeginDisabled();
+            if (ImGui::Button("Undo", ImVec2(half_w, 24))) {
+                history_index--;
+                g_params = history[(size_t)history_index];
+                params_changed = true;
+                history_dirty = false;
+                g_full_refresh_requested = true;
+                debug_log("ui undo -> history_index=%d full refresh", history_index);
             }
-        }
+            if (!can_undo) ImGui::EndDisabled();
+            
+            ImGui::SameLine();
+            
+            if (!can_redo) ImGui::BeginDisabled();
+            if (ImGui::Button("Redo", ImVec2(half_w, 24))) {
+                history_index++;
+                g_params = history[(size_t)history_index];
+                params_changed = true;
+                history_dirty = false;
+                g_full_refresh_requested = true;
+                debug_log("ui redo -> history_index=%d full refresh", history_index);
+            }
+            if (!can_redo) ImGui::EndDisabled();
 
-        const bool export_controls_disabled = (g_image.proxy_buffer == NULL) || g_export_in_progress.load() || g_load_in_progress.load();
-        bool can_export = !export_controls_disabled;
-        if (!can_export) ImGui::BeginDisabled();
-        if (ImGui::Button("Export Image", ImVec2(-1, 30))) {
-            if (g_image.proxy_buffer) {
-                nfdchar_t *outPath = NULL;
-                nfdresult_t result = NFD_SaveDialog("png,jpg,jpeg", NULL, &outPath);
+            if (ImGui::Button("Copy Settings", ImVec2(half_w, 24))) {
+                copied_params = g_params;
+                has_copied_params = true;
+            }
+            ImGui::SameLine();
+            if (!has_copied_params) ImGui::BeginDisabled();
+            if (ImGui::Button("Paste Settings", ImVec2(half_w, 24))) {
+                g_params = copied_params;
+                params_changed = true;
+                debug_log("ui paste settings");
+            }
+            if (!has_copied_params) ImGui::EndDisabled();
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            if (ImGui::Button("Load Preset", ImVec2(half_w, 24))) {
+                nfdchar_t* outPath = NULL;
+                nfdresult_t result = NFD_OpenDialog("preset,txt", NULL, &outPath);
                 if (result == NFD_OKAY) {
-                    request_export_async(outPath);
+                    EditorParams loaded = g_params;
+                    if (load_preset_file(outPath, &loaded)) {
+                        g_params = loaded;
+                        params_changed = true;
+                        sidecar_dirty = true;
+                    }
                     free(outPath);
                 }
             }
-        }
-        if (!can_export) ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("Save Preset", ImVec2(half_w, 24))) {
+                nfdchar_t* outPath = NULL;
+                nfdresult_t result = NFD_SaveDialog("preset,txt", NULL, &outPath);
+                if (result == NFD_OKAY) {
+                    sidecar_last_ok = save_preset_file(outPath, g_params);
+                    free(outPath);
+                }
+            }
 
-        if (g_export_in_progress.load()) {
-            ImGui::Text("Export: running...");
-            ImGui::ProgressBar(g_export_progress.load(), ImVec2(-1, 0));
-        } else if (g_export_done.exchange(false)) {
-            last_export_success = g_export_success.load();
-            export_notice_until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            char sidecar_path[1300] = {0};
+            bool has_sidecar_target = build_sidecar_path(sidecar_path, sizeof(sidecar_path), g_current_image_path);
+            
+            if (!has_sidecar_target) ImGui::BeginDisabled();
+            if (ImGui::Button("Load Sidecar", ImVec2(half_w, 24))) {
+                EditorParams loaded = g_params;
+                if (load_preset_file(sidecar_path, &loaded)) {
+                    g_params = loaded;
+                    params_changed = true;
+                    sidecar_last_ok = true;
+                    sidecar_dirty = false;
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Save Sidecar", ImVec2(half_w, 24))) {
+                sidecar_last_ok = save_preset_file(sidecar_path, g_params);
+                if (sidecar_last_ok) sidecar_dirty = false;
+            }
+            if (!has_sidecar_target) ImGui::EndDisabled();
+            
+            if (sidecar_dirty || !sidecar_last_ok) {
+                ImGui::TextDisabled("Sidecar: %s", !sidecar_last_ok ? "Write Failed" : "Unsaved Changes");
+            }
         }
 
-        if (!g_export_in_progress.load() && std::chrono::steady_clock::now() < export_notice_until) {
-            ImGui::Text("Export: %s", last_export_success ? "done" : "failed");
+        if (ImGui::CollapsingHeader("File & Export", ImGuiTreeNodeFlags_DefaultOpen)) {
+            float avail_w = ImGui::GetContentRegionAvail().x;
+            float half_w = (avail_w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+
+            const bool load_controls_disabled = g_load_in_progress.load();
+            if (load_controls_disabled) ImGui::BeginDisabled();
+            if (ImGui::Button("Add Images", ImVec2(half_w, 30))) {
+                nfdpathset_t pathset;
+                nfdresult_t result = NFD_OpenDialogMultiple("arw,cr2,cr3,nef,dng,raw,raf,orf,pef,srw,x3f,rw2,3fr,iiq,kdc,mos,mrw,mef,erf,sr2,nrw", NULL, &pathset);
+                if (result == NFD_OKAY) {
+                    std::vector<std::string> paths;
+                    size_t count = NFD_PathSet_GetCount(&pathset);
+                    paths.reserve(count);
+                    for (size_t i = 0; i < count; ++i) {
+                        nfdchar_t* selected = NFD_PathSet_GetPath(&pathset, i);
+                        if (selected && selected[0]) paths.push_back(selected);
+                    }
+                    NFD_PathSet_Free(&pathset);
+                    add_multiple_paths(paths, image_queue.empty() || current_image_index < 0);
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Add Folder", ImVec2(half_w, 30))) {
+                nfdchar_t* outPath = NULL;
+                nfdresult_t result = NFD_PickFolder(NULL, &outPath);
+                if (result == NFD_OKAY) {
+                    std::vector<std::string> folder_paths;
+                    append_raw_files_from_folder(outPath, folder_paths);
+                    free(outPath);
+                    add_multiple_paths(folder_paths, image_queue.empty() || current_image_index < 0);
+                }
+            }
+            if (load_controls_disabled) ImGui::EndDisabled();
+
+            if (image_queue.empty()) {
+                ImGui::TextDisabled("Add some RAW files/folder to start.");
+            } else {
+                ImGui::TextDisabled("Loaded images: %d", (int)image_queue.size());
+            }
+
+            ImGui::Spacing();
+
+            const bool export_controls_disabled = (g_image.proxy_buffer == NULL) || g_export_in_progress.load() || g_load_in_progress.load();
+            if (export_controls_disabled) ImGui::BeginDisabled();
+            if (ImGui::Button("Export Image", ImVec2(-1, 30))) {
+                if (g_image.proxy_buffer) {
+                    nfdchar_t *outPath = NULL;
+                    nfdresult_t result = NFD_SaveDialog("png,jpg,jpeg", NULL, &outPath);
+                    if (result == NFD_OKAY) {
+                        request_export_async(outPath);
+                        free(outPath);
+                    }
+                }
+            }
+            if (export_controls_disabled) ImGui::EndDisabled();
+
+            if (g_export_in_progress.load()) {
+                ImGui::Text("Export: running...");
+                ImGui::ProgressBar(g_export_progress.load(), ImVec2(-1, 0));
+            } else if (g_export_done.exchange(false)) {
+                last_export_success = g_export_success.load();
+                export_notice_until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            }
+
+            if (!g_export_in_progress.load() && std::chrono::steady_clock::now() < export_notice_until) {
+                ImGui::Text("Export: %s", last_export_success ? "done" : "failed");
+            }
         }
 
+        if (ImGui::CollapsingHeader("System Status")) {
+            const char* status_text = g_load_in_progress.load() ? "Loading" : (processing_pending ? "Processing" : "Idle");
+            ImGui::Text("Status: %s", status_text);
+            ImGui::Text("Source: %s", g_image.using_proxy_source ? "Proxy" : "Full");
+            ImGui::Text("History steps: %d / %d", history_index + 1, (int)history.size());
+            ImGui::TextDisabled("Render: %.1f ms", last_processing_ms);
+            ImGui::TextDisabled("Worker: %.1f ms", g_last_process_ms.load());
+            ImGui::TextDisabled("Hist pass: %.1f ms", g_last_histogram_ms.load());
+        }
+
+        ImGui::PopItemWidth();
         ImGui::End();
 
         ImGui::SetNextWindowPos(ImVec2(0, io.DisplaySize.y - bottom_bar_height));
