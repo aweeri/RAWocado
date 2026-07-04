@@ -51,6 +51,7 @@ jobs:
 
           mkdir -p dist
           cp RAWocado.exe dist/
+          cp *.ico dist/ 2>/dev/null || true
 
           mapfile -t deps < <(x86_64-w64-mingw32-objdump -p RAWocado.exe | awk '/DLL Name:/{print $3}' | sort -u)
           missing=()
@@ -126,7 +127,8 @@ jobs:
           EOF
 
           short_sha="${GITHUB_SHA::7}"
-          zip -9 -r "RAWocado-${short_sha}.zip" dist
+          mv dist rawocado
+          zip -9 -r "RAWocado-${short_sha}.zip" rawocado
 
       - name: Publish commit release
         uses: softprops/action-gh-release@v2
@@ -140,6 +142,3 @@ jobs:
             Automated build from the latest pushed commit.
           files: |
             RAWocado-*.zip
-            dist/RAWocado.exe
-            dist/*.dll
-            dist/BUILD_INFO.txt
