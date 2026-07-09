@@ -706,6 +706,63 @@ static inline void sample_staged_rgb(const ProcessingContext& ctx, int x, int y,
     *b = ctx.staged_rgb[(size_t)rgb_idx + 2];
 }
 
+static void atrous_denoise(std::vector<float>& buffer, int w, int h, int levels, float amount) {
+    if (levels <= 0 || amount <= 1e-6f) return;
+    
+    std::vector<float> c = buffer;
+    std::vector<float> next_c(w * h, 0.0f);
+    std::vector<float> reconstructed(w * h, 0.0f);
+    std::vector<float> temp(w * h, 0.0f);
+    
+    const float kernel[5] = {1.0f/16.0f, 4.0f/16.0f, 6.0f/16.0f, 4.0f/16.0f, 1.0f/16.0f};
+    
+    for (int level = 0; level < levels; ++level) {
+        int step = 1 << level;
+        
+        // Separable horizontal pass
+        for (int y = 0; y < h; ++y) {
+            int row = y * w;
+            for (int x = 0; x < w; ++x) {
+                float sum = 0.0f;
+                for (int k = -2; k <= 2; ++k) {
+                    int sx = clamp(x + k * step, 0, w - 1);
+                    sum += c[row + sx] * kernel[k + 2];
+                }
+                temp[row + x] = sum;
+            }
+        }
+        
+        // Separable vertical pass
+        for (int x = 0; x < w; ++x) {
+            for (int y = 0; y < h; ++y) {
+                float sum = 0.0f;
+                for (int k = -2; k <= 2; ++k) {
+                    int sy = clamp(y + k * step, 0, h - 1);
+                    sum += temp[sy * w + x] * kernel[k + 2];
+                }
+                next_c[y * w + x] = sum;
+            }
+        }
+        
+        // Soft thresholding detail coefficients
+        float level_threshold = amount / (float)(1 << level); 
+        
+        for (int i = 0; i < w * h; ++i) {
+            float detail = c[i] - next_c[i];
+            float sign = (detail > 0.0f) ? 1.0f : -1.0f;
+            float thresholded = fmaxf(fabsf(detail) - level_threshold, 0.0f) * sign;
+            reconstructed[i] += thresholded;
+        }
+        
+        c = next_c;
+    }
+    
+    // Add final residual back to thresholded details
+    for (int i = 0; i < w * h; ++i) {
+        buffer[i] = reconstructed[i] + c[i];
+    }
+}
+
 static inline void sample_linear_ycbcr(const ProcessingContext& ctx, int x, int y, float* yv, float* cbv, float* crv) {
     int idx = stage_index_clamped(ctx, x, y);
     if (ctx.has_ycbcr_maps) {
@@ -768,8 +825,8 @@ static ProcessingContext build_processing_context_from_snapshot(bool fast_previe
     int kernel_pad = 0;
     if (ctx.use_spatial) kernel_pad = std::max(kernel_pad, 6);
     if (ctx.use_dehaze) kernel_pad = std::max(kernel_pad, 8);
-    if (ctx.use_nr) kernel_pad = std::max(kernel_pad, (int)ceilf(1.0f + 2.0f * ctx.nr_amt));
-    if (ctx.use_cnr) kernel_pad = std::max(kernel_pad, (int)ceilf(1.0f + ctx.cnr_amt));
+    if (ctx.use_nr) kernel_pad = std::max(kernel_pad, 16);
+    if (ctx.use_cnr) kernel_pad = std::max(kernel_pad, 32);
 
     ctx.stage_x0 = vis_x0 - kernel_pad;
     ctx.stage_y0 = vis_y0 - kernel_pad;
@@ -850,6 +907,16 @@ static ProcessingContext build_processing_context_from_snapshot(bool fast_previe
                 }
             }
         }
+    }
+
+    // Denoise linear maps first so downstream spatial filters inherit the clean signal
+    if (ctx.use_nr) {
+        atrous_denoise(ctx.luma, ctx.stage_w, ctx.stage_h, 4, ctx.nr_amt * 0.05f);
+    }
+    
+    if (ctx.use_cnr) {
+        atrous_denoise(ctx.cb, ctx.stage_w, ctx.stage_h, 5, ctx.cnr_amt * 0.08f);
+        atrous_denoise(ctx.cr, ctx.stage_w, ctx.stage_h, 5, ctx.cnr_amt * 0.08f);
     }
 
     if (ctx.use_spatial) {
@@ -1051,29 +1118,13 @@ static void process_pixel(const ProcessingContext& ctx, int x, int y, float* out
     g = luma + (g - luma) * vib_gain;
     b = luma + (b - luma) * vib_gain;
 
+    // Noise mapping is now handled globally prior to tone curve application
     if (ctx.use_nr) {
         float nr = ctx.nr_amt;
-
-        float radius_f = 1.0f + 2.0f * nr;
-        int radius = (int)ceilf(radius_f);
-        float y_center = luminance709(r, g, b);
-        float y_sum = 0.0f;
-        float w_sum = 0.0f;
-
-        for (int oy = -radius; oy <= radius; ++oy) {
-            for (int ox = -radius; ox <= radius; ++ox) {
-                float y_n, cb_n, cr_n;
-                sample_linear_ycbcr(ctx, x + ox, y + oy, &y_n, &cb_n, &cr_n);
-                float dsq = (float)(ox * ox + oy * oy);
-                float spatial_w = expf(-dsq / (2.0f * radius_f * radius_f + 1e-6f));
-                float range_w = expf(-fabsf(y_n - y_center) / (0.06f + 0.06f * (1.0f - nr)));
-                float wgt = spatial_w * range_w;
-                y_sum += y_n * wgt;
-                w_sum += wgt;
-            }
-        }
-
-        float denoised_luma = (w_sum > 1e-6f) ? (y_sum / w_sum) : y_center;
+        float y_n, cb_n, cr_n;
+        sample_linear_ycbcr(ctx, x, y, &y_n, &cb_n, &cr_n);
+        
+        float denoised_luma = y_n;
         float yl = luminance709(r, g, b);
         float target_luma = mixf(yl, denoised_luma, nr);
         if (yl > 1e-6f) {
@@ -1088,31 +1139,12 @@ static void process_pixel(const ProcessingContext& ctx, int x, int y, float* out
         float cnr = ctx.cnr_amt;
         float ycur, cbcur, crcur;
         rgb_to_ycbcr(r, g, b, &ycur, &cbcur, &crcur);
-
-        float radius_f = 1.0f + cnr;
-        int radius = (int)ceilf(radius_f);
-        float cb_sum = 0.0f;
-        float cr_sum = 0.0f;
-        float w_sum = 0.0f;
-
-        for (int oy = -radius; oy <= radius; ++oy) {
-            for (int ox = -radius; ox <= radius; ++ox) {
-                float y_n, cb_n, cr_n;
-                sample_linear_ycbcr(ctx, x + ox, y + oy, &y_n, &cb_n, &cr_n);
-                float dsq = (float)(ox * ox + oy * oy);
-                float spatial_w = expf(-dsq / (2.0f * radius_f * radius_f + 1e-6f));
-                float luma_w = expf(-fabsf(y_n - ycur) / 0.10f);
-                float wgt = spatial_w * luma_w;
-                cb_sum += cb_n * wgt;
-                cr_sum += cr_n * wgt;
-                w_sum += wgt;
-            }
-        }
-
-        float cb_smooth = (w_sum > 1e-6f) ? (cb_sum / w_sum) : cbcur;
-        float cr_smooth = (w_sum > 1e-6f) ? (cr_sum / w_sum) : crcur;
-        cbcur = mixf(cbcur, cb_smooth, cnr);
-        crcur = mixf(crcur, cr_smooth, cnr);
+        
+        float y_n, cb_n, cr_n;
+        sample_linear_ycbcr(ctx, x, y, &y_n, &cb_n, &cr_n);
+        
+        cbcur = mixf(cbcur, cb_n, cnr);
+        crcur = mixf(crcur, cr_n, cnr);
         ycbcr_to_rgb(ycur, cbcur, crcur, &r, &g, &b);
     }
 
